@@ -1,6 +1,6 @@
 {
   "name": "s3-multipart-stream",
-  "version": "0.0.0",
+  "version": "0.0.1",
   "description": "Writable stream to s3 using multipart upload",
   "main": "index.js",
   "scripts": {

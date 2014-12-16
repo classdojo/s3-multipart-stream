@@ -19,6 +19,8 @@ var options = {
   parallelUploads : 10,
   chunkUploadSize : 5242880, // Upload at most 10 chunks of 5MB at a time.
   multipartCreationParams: {
+    Bucket: "myBucket",
+    Key: "myKey"
     /* Any params accepted by s3 multipart creation API */
   },
   workingDirectory : "/tmp"
