@@ -24,6 +24,7 @@
   "homepage": "https://github.com/classdojo/s3-multipart-stream",
   "dependencies": {
     "debug": "2.1.0",
+    "lodash": "2.4.1",
     "node-uuid": "1.4.2",
     "slide": "1.1.6"
   },
