@@ -1,6 +1,6 @@
 {
   "name": "s3-multipart-stream",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "Fast writable stream to Amazon S3's Multipart API using streams2 and concurrent chunk uploads.",
   "main": "index.js",
   "scripts": {
