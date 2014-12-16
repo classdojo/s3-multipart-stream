@@ -1,5 +1,7 @@
-s3-multipart-stream
-===================
+## s3-multipart-stream
+[![Build Status](https://travis-ci.org/classdojo/s3-multipart-stream.svg?branch=master)](https://travis-ci.org/classdojo/s3-multipart-stream)
+[![codecov.io](https://codecov.io/github/classdojo/s3-multipart-stream/coverage.svg?branch=master)](https://codecov.io/github/classdojo/s3-multipart-stream?branch=master)
+[![NPM version](https://badge.fury.io/js/s3-multipart-stream.png)](http://badge.fury.io/js/s3-multipart-stream)
 
 
 ```javascript
