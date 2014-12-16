@@ -4,12 +4,11 @@ var rewire = require("rewire");
 var s3Multipart = rewire("./");
 var _              = require("lodash");
 
-var MINIMUM_CHUNK_UPLOAD_SIZE = 25;
-var PARALLEL_UPLOADS          = 2;
+var MINIMUM_CHUNK_UPLOAD_SIZE   = 25;
+var CONCURRENT_UPLOADS          = 2;
 
 s3Multipart.__set__("MINIMUM_CHUNK_UPLOAD_SIZE", MINIMUM_CHUNK_UPLOAD_SIZE);
-s3Multipart.__set__("MINIMUM_CHUNK_UPLOAD_SIZE", MINIMUM_CHUNK_UPLOAD_SIZE);
-s3Multipart.__set__("PARALLEL_UPLOADS", PARALLEL_UPLOADS);
+s3Multipart.__set__("CONCURRENT_UPLOADS", CONCURRENT_UPLOADS);
 
 describe("s3-multipart-new", function() {
   var mockS3Client;
@@ -314,7 +313,7 @@ describe("s3-multipart-new", function() {
         });
 
         it("refills the __outstandingUploads up to parallel uploads limit", function() {
-          uploader.__parallelUploads = PARALLEL_UPLOADS;
+          uploader.__concurrentUploads = CONCURRENT_UPLOADS;
           uploader.serviceUploads();
           expect(uploader.__outstandingUploads).to.have.length(2);
         });

@@ -15,7 +15,7 @@ var uploadDebug    = require("debug")("upload");
 var multiDebug     = require("debug")("multi");
 
 var MINIMUM_CHUNK_UPLOAD_SIZE = 5242880;
-var PARALLEL_UPLOADS = 10;
+var CONCURRENT_UPLOADS = 10;
 
 // function MultipartWriteS3(s3Client) {
 //   this.__s3Client = s3Client;
@@ -40,7 +40,7 @@ function MultipartWriteS3Upload(s3Client, options) {
   this.__uploadsInProgress = 0;
   this.waitingUploads = [];
   this.__uploader = new Uploader(this, options.workingDirectory);
-  this.__parallelUploads = options.parallelUploads || PARALLEL_UPLOADS;
+  this.__concurrentUploads = options.maxConcurrentUploads || CONCURRENT_UPLOADS;
   this.__chunkUploadSize = _.isEmpty(options.chunkUploadSize) || 
                            _.isNaN(options.chunkUploadSize) ||
                            options.chunkUploadSize < MINIMUM_CHUNK_UPLOAD_SIZE ?
@@ -54,7 +54,7 @@ function MultipartWriteS3Upload(s3Client, options) {
  * @param s3Client - fully configured aws-sdk instance
  * @param options
  *          options.chunkUploadSize
- *          options.parallelUploads
+ *          options.maxConcurrentUploads
  *          options.multipartCreationParams -     {
  *               Bucket: 'STRING_VALUE',
  *               Key: 'STRING_VALUE',
@@ -81,9 +81,6 @@ function MultipartWriteS3Upload(s3Client, options) {
  *               WebsiteRedirectLocation: 'STRING_VALUE'
  *             };
  *          options.workingDirectory
- *          options.parallelUploads
- *
- *
  *
 */
 MultipartWriteS3Upload.create = function(s3Client, options, cb) {
@@ -254,7 +251,7 @@ Uploader.prototype.serviceUploads = function() {
   var upload;
   //cleanup outstandingUploads array
   this._cleanupAndLogFinishedJobs();
-  while(this.__outstandingUploads.length < this.__parallelUploads && !_.isEmpty(this.__waitingUploads)) {
+  while(this.__outstandingUploads.length < this.__concurrentUploads && !_.isEmpty(this.__waitingUploads)) {
     uploaderDebug("Initiating upload");
     upload = new UploadJob(this.__waitingUploads.shift());
     upload.start();

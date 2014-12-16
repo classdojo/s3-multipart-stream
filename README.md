@@ -4,11 +4,16 @@
 [![NPM version](https://badge.fury.io/js/s3-multipart-stream.png)](http://badge.fury.io/js/s3-multipart-stream)
 
 
+s3-multipart-stream uploads files to Amazon S3 using the multipart upload API. It uploads streams by separating it into chunks and concurently uploading those chunks to S3.  The chunk size and maximum concurrent upload count is configurable via the options hash.
+
+Each chunk upload is recorded in a working file whose location is specified by the workingDirectory option. Successful chunk uploads write their ETag, upload number, and chunk size to the file, while chunks that error out additionally write their data and error message into the file.
+
 ```javascript
 var AWS               = require("aws-sdk");
 var S3MultipartStream = require("s3-multipart-stream");
 var fs                = require("fs");
 
+/* Configure the AWS client with your credentials */
 var s3 = new AWS.S3({
   accessKeyId: "myAccessKey",
   secretAccessKey: "mySecretAccessKey",
@@ -16,8 +21,9 @@ var s3 = new AWS.S3({
 });
 
 var options = {
-  parallelUploads : 10,
-  chunkUploadSize : 5242880, // Upload at most 10 chunks of 5MB at a time.
+  /* Upload at most 10 concurrent chunks of 5MB each */
+  chunkUploadSize         :  5242880
+  maxConcurrentUploads    :  10
   multipartCreationParams: {
     Bucket: "myBucket",
     Key: "myKey"
@@ -36,3 +42,8 @@ var s3Stream = S3MultipartStream.create(s3, options, function(err, s3Stream) {
   .pipe(s3Stream);  
 });
 ```
+
+
+## TODO
+
+* Add `retryUpload(dataFile, journalFile)` method that retries a failed upload by retrying failed chunks.
