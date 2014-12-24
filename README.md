@@ -29,17 +29,23 @@ var options = {
     Key: "myKey"
     /* Any params accepted by s3 multipart creation API */
   },
-  workingDirectory : "/tmp"
+  retryUpload: {
+    workingDirectory  : "/tmp",
+    sourceFile        : "",
+    retries           : 10      
+  }
 };
 
-var s3Stream = S3MultipartStream.create(s3, options, function(err, s3Stream) {
+S3MultipartStream.create(s3, options, function(err, s3Stream) {
   if(err) {
     console.error(err);
     process.exit(1);
   }
+
   var fileStream = fs.createReadStream("someFile.txt");
   fileStream
-  .pipe(s3Stream);  
+  .pipe(s3Stream);
+
 });
 ```
 

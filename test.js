@@ -47,7 +47,10 @@ describe("s3-multipart-new", function() {
     });
     s3 = new s3Multipart(mockS3Client, {
       chunkUploadSize: 1,
-      workingDirectory: __dirname + "/tmp"
+      retryUpload: {
+        workingDirectory : __dirname + "/tmp",
+        sourceFile       : __dirname + "/test-source-file.txt"
+      }
     });
     s3.s3MultipartUploadConfig = s3MultipartUploadConfig;
   });
@@ -56,6 +59,14 @@ describe("s3-multipart-new", function() {
 
     describe("MultipartWriteS3Upload.create", function() {
 
+    });
+
+    describe("constructor", function() {
+
+      it("saves a proper journal file reference in `journalFile`", function() {
+        var journalFile = s3.journalFile;
+        expect(journalFile.match(/.*\/tmp\/upload-job-[0-9]{4}-[0-9].+-[0-9].+T[0-9\.Z].+\.json$/)).to.be.ok();
+      });
     });
 
     describe("#_write", function() {
@@ -161,6 +172,14 @@ describe("s3-multipart-new", function() {
           done();
         });
       });
+
+      // it("writes the file's MD5 checksum to the journal file", function() {
+
+      // });
+    });
+
+    describe("#retryUpload", function() {
+
     });
 
     describe("#_completeMultipartUpload", function() {
@@ -421,17 +440,19 @@ describe("s3-multipart-new", function() {
                 success: [
                   {
                     partNumber: 2,
+                    chunkSize: 12,
                     ETag: "ETag1"
                   },
                   {
                     partNumber: 3,
+                    chunkSize: 18,
                     ETag: "ETag2"
                   }
                 ],
                 failed: [{
                   partNumber: 1,
-                  error: "error",
-                  data: [115, 116, 114, 105, 110, 103]
+                  chunkSize: 6,
+                  error: "error"
                 }]
               }
             };
@@ -479,13 +500,16 @@ describe("s3-multipart-new", function() {
       });
 
       describe("#start", function() {
+        it("calls the saved uploadFn of the serialized payload");
 
+        it("emits `uploadError` on failed job");
+
+        it("remembers the uploadResponse from s3");
       });
 
       describe("#stop", function() {
-
+        it("stops the uploader");
       });
-
     });
 
     describe("UploadJob", function() {
@@ -502,8 +526,9 @@ describe("s3-multipart-new", function() {
           it("returns a properly formatted serialized object", function() {
             var expectedConfig = {
               partNumber: 1,
-              error: "error",
-              data: [115, 116, 114, 105, 110, 103]
+              chunkSize: 6,
+              status: "failed",
+              error: "error"
             };
             config = failedJob.serialize();
             expect(config).to.eql(expectedConfig);
@@ -520,6 +545,8 @@ describe("s3-multipart-new", function() {
           it("returns a properly formatted serialized object", function() {
             var expectedConfig = {
               partNumber: 2,
+              chunkSize: 12,
+              status: "success",
               ETag: "ETag1"
             };
             config = successJob.serialize();
@@ -537,6 +564,7 @@ describe("s3-multipart-new", function() {
           it("returns a properly formatted serialized object", function() {
             var expectedConfig = {
               partNumber: 2,
+              chunkSize: 12,
               status: "waiting"
             };
             config = otherJob.serialize();
@@ -545,9 +573,6 @@ describe("s3-multipart-new", function() {
         });
       });
     });
-
   });
-
 });
-
 

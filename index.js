@@ -32,19 +32,22 @@ var CONCURRENT_UPLOADS = 10;
 inherits(MultipartWriteS3Upload, Writable);
 function MultipartWriteS3Upload(s3Client, options) {
   Writable.call(this);
-  this.__s3Client = s3Client;
-  this.__partNumber = 1;
-  this.__chunks = [];
-  this.__uploadedParts = [];
-  this.__queuedUploadSize = 0;
-  this.__uploadsInProgress = 0;
-  this.waitingUploads = [];
-  this.__uploader = new Uploader(this, options.workingDirectory);
-  this.__concurrentUploads = options.maxConcurrentUploads || CONCURRENT_UPLOADS;
-  this.__chunkUploadSize = _.isEmpty(options.chunkUploadSize) || 
-                           _.isNaN(options.chunkUploadSize) ||
-                           options.chunkUploadSize < MINIMUM_CHUNK_UPLOAD_SIZE ?
-                                MINIMUM_CHUNK_UPLOAD_SIZE : options.chunkUploadSize;
+  this.__s3Client           = s3Client;
+  this.__partNumber         = 1;
+  this.__chunks             = [];
+  this.__uploadedParts      = [];
+  this.__queuedUploadSize   = 0;
+  this.__uploadsInProgress  = 0;
+  this.waitingUploads       = [];
+  if(options.retryUpload) {
+    this.journalFile          = options.retryUpload.workingDirectory + "/upload-job-" + (new Date()).toISOString() + ".json";
+  }
+  this.__uploader           = new Uploader(this, this.journalFile);
+  this.__concurrentUploads  = options.maxConcurrentUploads || CONCURRENT_UPLOADS;
+  this.__chunkUploadSize    = _.isEmpty(options.chunkUploadSize) || 
+                               _.isNaN(options.chunkUploadSize) ||
+                               options.chunkUploadSize < MINIMUM_CHUNK_UPLOAD_SIZE ?
+                                    MINIMUM_CHUNK_UPLOAD_SIZE : options.chunkUploadSize;
 
 }
 
@@ -101,7 +104,6 @@ MultipartWriteS3Upload.create = function(s3Client, options, cb) {
 MultipartWriteS3Upload._addFinishHandler = function(multipartWriteS3Upload) {
   /* adds finish logic */
   multipartWriteS3Upload.on("finish", function() {
-    console.log("FINISH CALLED");
     multipartWriteS3Upload.finishUpload(function(err) {
       if(err) {
         return multipartWriteS3Upload.emit("error", err);
@@ -221,11 +223,9 @@ MultipartWriteS3Upload.prototype._uploadChunks = function(partNumber, chunks, cb
 };
 
 inherits(Uploader, EventEmitter);
-function Uploader(s3Multipart, workingDirectory) {
+function Uploader(s3Multipart, workingFile) {
   this.__waitingUploads     = s3Multipart.waitingUploads;
-  this.__workingDirectory   = workingDirectory;
   this.__id                 = uuid.v1();
-  this.__journalFile        = workingDirectory + "/upload-job-" + this.__id + ".json";
   this.__journal            = {
     uploadConfig: s3Multipart.s3MultipartUploadConfig,
     segments: {
@@ -235,10 +235,11 @@ function Uploader(s3Multipart, workingDirectory) {
   };
   this.__outstandingUploads = [];
   this.__failedUploads      = [];
+  this.__journalMode        = !!workingFile;
+  this.__journalFile        = workingFile;
 }
 
 Uploader.prototype.start = function() {
-  console.log("Uploader starting. Working file: " + this.__journalFile);
   this.__i = setInterval(this.serviceUploads.bind(this), 1000);
 };
 
@@ -268,7 +269,7 @@ Uploader.prototype._cleanupAndLogFinishedJobs = function() {
   for(i in this.__outstandingUploads) {
     upload = this.__outstandingUploads[i];
     if(/failed|success/.test(upload.status)) {
-      this.__journal.segments[upload.status].push(upload.serialize());
+      this.__journal.segments[upload.status].push(_.omit(upload.serialize(), "status"));
       this.__outstandingUploads[i] = null;
     }
   }
@@ -281,6 +282,9 @@ Uploader.prototype._cleanupAndLogFinishedJobs = function() {
 
 /* Only allow at most one outstanding commit to fs */
 Uploader.prototype.commitJournal = function() {
+  if(!this.__journalMode) {
+    return;
+  }
   var me = this;
   if(!this.__outstandingJournal) {
     this.__outstandingJournal = true;
@@ -307,7 +311,7 @@ UploadJob.prototype.start = function() {
     if(err) {
       me.status = "failed";
       me.error = err;
-      //flush success data
+      // me.emit("uploadError");
     } else {
       me.status = "success";
       me.uploadResponse = uploadResponse;
@@ -320,32 +324,16 @@ UploadJob.prototype.serialize = function() {
   var encodedData = [],
   serialized = {
     partNumber: this.config.partNumber,
+    chunkSize:  this.config.chunkSize,
+    status: this.status
   },
   chunk;
   if(this.status === "failed") {
-    //encode data
-    for(var i = 0; i < this.config.chunks.length; i++) {
-      chunk = this.config.chunks[i];
-      if(_.isString(chunk)) {
-        //String. let's transform string into char val array
-        encodedData = encodedData.concat(_.map(chunk, function(e) {
-          return e.charCodeAt(0);
-        }));
-      } else {
-        //Buffer
-        encodedData = encodedData.concat(chunk.toJSON());
-      }
-    }
     serialized.error = this.error.message;
-    serialized.data  = encodedData;
-    return serialized;
   } else if(this.status === "success") {
     serialized.ETag = this.uploadResponse.ETag;
-    return serialized;
-  } else {
-    serialized.status = this.status;
-    return serialized;
   }
+  return serialized;
 };
 
 module.exports = MultipartWriteS3Upload;
