@@ -468,6 +468,12 @@ describe("s3-multipart-new", function() {
           writeFileStub.reset();
         });
 
+        it("does nothing if journal mode is not enabled", function() {
+          uploader.__journalMode = false;
+          uploader.commitJournal();
+          expect(writeFileStub.callCount).to.be(0);
+        });
+
         it("only allows one outstanding write at a time", function() {
           //simulate two quick successive calls
           uploader.commitJournal();
