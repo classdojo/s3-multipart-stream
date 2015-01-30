@@ -1,8 +1,10 @@
-var expect = require("expect.js");
-var sinon  = require("sinon");
-var rewire = require("rewire");
-var s3Multipart = rewire("./");
+var expect         = require("expect.js");
+var sinon          = require("sinon");
+var rewire         = require("rewire");
+var s3Multipart    = rewire("./");
 var _              = require("lodash");
+var fs             = require("fs");
+var timekeeper     = require("timekeeper");
 
 var MINIMUM_CHUNK_UPLOAD_SIZE   = 25;
 var CONCURRENT_UPLOADS          = 2;
@@ -21,6 +23,8 @@ describe("s3-multipart-new", function() {
     Bucket: "myBucket",
     Key: "myKey"
   };
+  var workingFile = __dirname + "/journal-test.json";
+  var sourceFile  = __dirname + "/test-source-file.txt";
 
   // creating a nice large string
   (function(){
@@ -51,8 +55,7 @@ describe("s3-multipart-new", function() {
         workingDirectory : __dirname + "/tmp",
         sourceFile       : __dirname + "/test-source-file.txt"
       }
-    });
-    s3.s3MultipartUploadConfig = s3MultipartUploadConfig;
+    }, s3MultipartUploadConfig);
   });
 
   describe("MultipartWriteS3Upload", function() {
@@ -63,10 +66,6 @@ describe("s3-multipart-new", function() {
 
     describe("constructor", function() {
 
-      it("saves a proper journal file reference in `journalFile`", function() {
-        var journalFile = s3.journalFile;
-        expect(journalFile.match(/.*\/tmp\/upload-job-[0-9]{4}-[0-9].+-[0-9].+T[0-9\.Z].+\.json$/)).to.be.ok();
-      });
     });
 
     describe("#_write", function() {
@@ -183,6 +182,29 @@ describe("s3-multipart-new", function() {
     });
 
     describe("#_completeMultipartUpload", function() {
+
+      beforeEach(function() {
+        sinon.stub(s3.__uploader, "once").yields();
+        sinon.stub(s3, "_finalizeUpload").yields(null);
+      });
+
+      it("waits for __uploader to emit empty", function(done) {
+        s3._completeMultipartUpload(function(err) {
+          expect(s3.__uploader.once.callCount).to.be(1);
+          done();
+        });
+      });
+
+      it("calls _finalizeUpload", function(done) {
+        s3._completeMultipartUpload(function(err) {
+          expect(s3._finalizeUpload.callCount).to.be(1);
+          done();
+        });
+      });
+    });
+
+
+    describe("#_finalizeUpload", function() {
       var uploadedPart1 = {
         ETag: "TAG",
         PartNumber: 1
@@ -191,11 +213,14 @@ describe("s3-multipart-new", function() {
         ETag: "TAG",
         PartNumber: 2
       };
+
       beforeEach(function() {
         s3.__uploadedParts = [uploadedPart2, uploadedPart1];
         s3.__s3Client.completeMultipartUpload.yields(null);
+        sinon.stub(s3.__journal, "logCompleteUploadResponse").yields(null);
       });
-      it("constructs a proper config to pass onto s3", function() {
+
+      it("calls s3#completeMultipartUpload with the proper config", function(done) {
         var expectedConfig = {
           UploadId  : s3MultipartUploadConfig.UploadId,
           Bucket    : s3MultipartUploadConfig.Bucket,
@@ -204,17 +229,22 @@ describe("s3-multipart-new", function() {
             Parts: [uploadedPart1, uploadedPart2]
           }
         };
-        s3._completeMultipartUpload(function(err) {
+        s3._finalizeUpload(function(err) {
           expect(s3.__s3Client.completeMultipartUpload.callCount).to.be(1);
           expect(s3.__s3Client.completeMultipartUpload.firstCall.args[0]).to.eql(expectedConfig);
+          done();
         });
-        s3.__uploader.emit("empty");
+
       });
 
-      it("waites for __uploader to emit empty", function(done) {
-        sinon.stub(s3.__uploader, "once").yields();
-        s3._completeMultipartUpload(function(err) {
-          expect(s3.__uploader.once.callCount).to.be(1);
+      it("calls Journal#logCompleteUploadResponse with the multipart error and response", function(done) {
+        var err = new Error("My Error");
+        var response = {some: "response"};
+        s3.__s3Client.completeMultipartUpload.yields(err, response);
+        s3._finalizeUpload(function(err) {
+          expect(s3.__journal.logCompleteUploadResponse.callCount).to.be(1);
+          expect(s3.__journal.logCompleteUploadResponse.firstCall.args[0]).to.eql(err);
+          expect(s3.__journal.logCompleteUploadResponse.firstCall.args[1]).to.eql(response);
           done();
         });
       });
@@ -315,45 +345,57 @@ describe("s3-multipart-new", function() {
     });
 
     describe("Uploader", function() {
+      var journal;
       beforeEach(function() {
-        uploader = new s3Multipart.__Uploader(s3, workingDirectory);
+        var retryOptions = {
+          workingDirectory: __dirname,
+          sourceFile: __dirname + "/test-source-file.txt"
+        };
+        journal = new s3Multipart.__Journal(s3MultipartUploadConfig, retryOptions);
+        journal._stubMethods();
+        uploader = new s3Multipart.__Uploader(s3, journal);
         uploader.__waitingUploads = [upload1, upload2, upload3];
       });
 
 
       describe("#serviceUploads", function() {
         beforeEach(function() {
-          uploader._cleanupAndLogFinishedJobs = sinon.stub();
+          uploader._cleanupAndLogFinishedJobs = sinon.stub().yields(null);
         });
 
         it("calls #_cleanupAndLogFinishedJobs", function() {
-          uploader.serviceUploads();
+          uploader._serviceUploads_();
           expect(uploader._cleanupAndLogFinishedJobs.callCount).to.be(1);
         });
 
-        it("refills the __outstandingUploads up to parallel uploads limit", function() {
+        it("refills the __outstandingUploads up to parallel uploads limit", function(done) {
           uploader.__concurrentUploads = CONCURRENT_UPLOADS;
-          uploader.serviceUploads();
-          expect(uploader.__outstandingUploads).to.have.length(2);
+          uploader._serviceUploads(function(err) {
+            expect(uploader.__outstandingUploads).to.have.length(2);
+            done();
+          });
         });
 
-        it("it does not add anything to __outstandingUploads if __waitingUploads is empty", function() {
+        it("it does not add anything to __outstandingUploads if __waitingUploads is empty", function(done) {
           uploader.__waitingUploads = [];
-          uploader.serviceUploads();
-          expect(uploader.__outstandingUploads).to.have.length(0);
+          uploader._serviceUploads(function(err) {
+            expect(uploader.__outstandingUploads).to.have.length(0);
+            done();
+          });
         });
 
         it("emits an 'empty' event if both __waitingUploads and __outstandingUploads are empty", function(done) {
           uploader.__waitingUploads = [];
           uploader.on("empty", done);
-          uploader.serviceUploads();
+          uploader._serviceUploads();
         });
 
         it("does not emit 'empty' if __outstandingUploads is not empty", function() {
+          // stubbing makes test synchronous
           uploader.on("empty", function() {
             throw new Error("should not emit");
           });
-          uploader.serviceUploads();
+          uploader._serviceUploads();
         });
       });
 
@@ -372,149 +414,128 @@ describe("s3-multipart-new", function() {
           });
           copiedJobs = jobs.map(_.identity);
           uploader.__outstandingUploads = jobs;
+          sinon.stub(journal, "logFinishedJobs").yields(null);
         });
 
-        it("adds failed jobs to the failed journal array", function() {
-          uploader._cleanupAndLogFinishedJobs();
-          expect(uploader.__journal.segments.failed).to.have.length(1);
-          expect(uploader.__journal.segments.failed[0]).to.not.be.empty();
-        });
 
-        it("adds successful jobs to the success journal array", function() {
-          uploader._cleanupAndLogFinishedJobs();
-          expect(uploader.__journal.segments.success).to.have.length(2);
-          expect(uploader.__journal.segments.success[0]).to.not.be.empty();
-          expect(uploader.__journal.segments.success[1]).to.not.be.empty();
-        });
-
-        it("compacts failed and successful jobs", function() {
-          uploader._cleanupAndLogFinishedJobs();
-          expect(uploader.__outstandingUploads).to.be.empty();
-        });
-
-        it("does not compact jobs that are not failed or successful", function() {
-          jobs.forEach(function(job) {
-            job.status = "waiting";
-          });
-          uploader._cleanupAndLogFinishedJobs();
-          expect(uploader.__outstandingUploads).to.have.length(3);
-        });
-
-        describe("serialization", function() {
-          beforeEach(function() {
-            jobs.forEach(function(job) {
-              job.serialize = sinon.stub();
-            });
-          });
-          it("serializes failed jobs", function() {
-            uploader._cleanupAndLogFinishedJobs();
-            expect(_.pluck(copiedJobs, "status").filter(function(status) { return status === "failed";})).to.not.be.empty();
-            copiedJobs.forEach(function(job) {
-              if(job.status === "failed") {
-                expect(job.serialize.callCount).to.be(1);
-              }
-            });
-          });
-
-          it("serializes successful jobs", function() {
-            uploader._cleanupAndLogFinishedJobs();
-            expect(_.pluck(copiedJobs, "status").filter(function(status) { return status === "success";})).to.not.be.empty();
-            copiedJobs.forEach(function(job) {
-              if(job.status === "success") {
-                expect(job.serialize.callCount).to.be(1);
-              }
-            });
-          });
-        });
-
-        describe("integration journal write", function() {
-
-          beforeEach(function() {
-            writeFileStub.reset();
-          });
-
-          it("attempts to write the proper journal file", function() {
-            var expectedJournal = {
-              uploadConfig: s3MultipartUploadConfig,
-              segments: {
-                success: [
-                  {
-                    partNumber: 2,
-                    chunkSize: 12,
-                    ETag: "ETag1"
-                  },
-                  {
-                    partNumber: 3,
-                    chunkSize: 18,
-                    ETag: "ETag2"
-                  }
-                ],
-                failed: [{
-                  partNumber: 1,
-                  chunkSize: 6,
-                  error: "error"
-                }]
-              }
-            };
-            uploader._cleanupAndLogFinishedJobs();
-            expect(writeFileStub.callCount).to.be(1);
-            expect(writeFileStub.firstCall.args[1]).to.be(JSON.stringify(expectedJournal));
-          });
-        });
-      });
-
-      describe("#commitJournal", function() {
-        beforeEach(function() {
-          writeFileStub.reset();
-        });
-
-        it("does nothing if journal mode is not enabled", function() {
-          uploader.__journalMode = false;
-          uploader.commitJournal();
-          expect(writeFileStub.callCount).to.be(0);
-        });
-
-        it("only allows one outstanding write at a time", function() {
-          //simulate two quick successive calls
-          uploader.commitJournal();
-          uploader.commitJournal();
-          expect(writeFileStub.callCount).to.be(1);
-        });
-
-        it("passes the proper arguments to fs.writeFile", function() {
-          var exampleJournal = {
-            uploadConfig: {},
-            segments: {
-              success: [],
-              failed: []
-            }
-          };
-          uploader.__journal = exampleJournal;
-          uploader.commitJournal();
-          expect(writeFileStub.firstCall.args[0]).to.be(uploader.__journalFile);
-          expect(writeFileStub.firstCall.args[1]).to.eql(JSON.stringify(exampleJournal));
-        });
-
-        it("emits 'journalError' when there's a problem writing the file", function(done) {
-          writeFileStub.yieldsAsync(new Error("error"));
-          uploader.on("journalError", function(err) {
-            expect(err).to.be.an(Error);
+        it("logs all finished jobs", function(done) {
+          uploader._cleanupAndLogFinishedJobs(function(err) {
+            expect(journal.logFinishedJobs.callCount).to.be(1);
+            var loggedJobs = journal.logFinishedJobs.firstCall.args[0];
+            expect(loggedJobs).to.have.length(3);
             done();
           });
-          uploader.commitJournal();
+        });
+
+        it("logs nothing if there are no jobs finished", function(done) {
+          uploader.__outstandingUploads = [new s3Multipart.__UploadJob(upload1)];
+          uploader._cleanupAndLogFinishedJobs(function(err) {
+            expect(journal.logFinishedJobs.callCount).to.be(0);
+            done();
+          });
         });
       });
 
       describe("#start", function() {
-        it("calls the saved uploadFn of the serialized payload");
-
-        it("emits `uploadError` on failed job");
-
-        it("remembers the uploadResponse from s3");
+        xit("starts the service upload loop", function(done) {
+          var stub = sinon.stub(uploader, "_serviceUploads");
+          uploader.start();
+          setTimeout(function() {
+            expect(stub.callCount).to.be(1);
+            done();
+          }, 25);
+          stub.restore();
+        });
       });
 
       describe("#stop", function() {
         it("stops the uploader");
+      });
+    });
+
+    describe("Journal", function() {
+      var journal;
+      var failedJob, successfulJob;
+      var FAILED = "failed";
+      var SUCCESS = "success";
+      var retryOptions = {
+        workingDirectory: __dirname,
+        sourceFile: __dirname + "/test-source-file.txt"
+      };
+      var frozenDate = new Date("2015-01-22T22:18:41.145Z");
+
+      beforeEach(function() {
+        timekeeper.freeze(frozenDate);
+        journal = new s3Multipart.__Journal(s3MultipartUploadConfig, retryOptions);
+        failedJob = new s3Multipart.__UploadJob(upload1);
+        successfulJob = new s3Multipart.__UploadJob(upload2);
+        failedJob.start();
+        successfulJob.start();
+      });
+
+      afterEach(function() {
+        timekeeper.reset();
+      });
+
+      describe("#logFinishedJobs", function() {
+
+        beforeEach(function() {
+          journal._updateJournalFile = sinon.stub().yields(null);
+        });
+
+        it("pushes the jobs into the proper journal segment", function(done) {
+          journal.logFinishedJobs([failedJob, successfulJob], function() {
+            expect(journal.__journal.segments[FAILED]).to.have.length(1);
+            expect(journal.__journal.segments[SUCCESS]).to.have.length(1);
+            expect(JSON.stringify(journal.__journal.segments[FAILED].shift())).to.be(JSON.stringify(failedJob));
+            expect(JSON.stringify(journal.__journal.segments[SUCCESS].shift())).to.be(JSON.stringify(successfulJob));
+            done();
+          });
+        });
+
+        it("updates the journal file the journal file", function(done) {
+          journal.logFinishedJobs([failedJob, successfulJob], function() {
+            expect(journal._updateJournalFile.callCount).to.be(1);
+            done();
+          });
+        });
+      });
+
+      describe("#_updateJournalFile", function() {
+
+        it("commits proper file contents to disk", function(done) {
+          var expectedFileContents = {
+            uploadConfig: s3MultipartUploadConfig,
+            segments: {
+              success: [successfulJob],
+              failed:  [failedJob]
+            }
+          };
+          //simplify setup by calling logfinishedJobs which calls _updatedJournalFile
+          journal.logFinishedJobs([failedJob, successfulJob], function() {
+            expect(writeFileStub.callCount).to.be(1);
+            expect(writeFileStub.firstCall.args[1]).to.eql(JSON.stringify(expectedFileContents));
+            done();
+          });
+        });
+
+        it("writes to the filename returned by _getJournalFileName", function(done) {
+          journal.logFinishedJobs([failedJob, successfulJob], function() {
+            expect(writeFileStub.firstCall.args[0]).to.eql(journal._getJournalFileName(retryOptions.workingDirectory));
+            done();
+          });
+        });
+      });
+
+      describe("#_getJournalFileName", function() {
+        it("creates a filename that is an ISO string representing now", function() {
+          expect(journal._getJournalFileName("/workingDirectory")).to.be("/workingDirectory/" + frozenDate.toISOString());
+        });
+
+      });
+
+      describe("#logCompleteUploadResponse", function() {
+
       });
     });
 
@@ -529,15 +550,15 @@ describe("s3-multipart-new", function() {
             failedJob.start();
           });
 
-          it("returns a properly formatted serialized object", function() {
+          it("stringifying returns a properly formatted serialized object", function() {
             var expectedConfig = {
               partNumber: 1,
               chunkSize: 6,
               status: "failed",
               error: "error"
             };
-            config = failedJob.serialize();
-            expect(config).to.eql(expectedConfig);
+            config = JSON.stringify(failedJob);
+            expect(config).to.eql(JSON.stringify(expectedConfig));
           });
         });
 
@@ -555,8 +576,8 @@ describe("s3-multipart-new", function() {
               status: "success",
               ETag: "ETag1"
             };
-            config = successJob.serialize();
-            expect(config).to.eql(expectedConfig);
+            config = JSON.stringify(successJob);
+            expect(config).to.eql(JSON.stringify(expectedConfig));
           });
 
         });
@@ -573,8 +594,8 @@ describe("s3-multipart-new", function() {
               chunkSize: 12,
               status: "waiting"
             };
-            config = otherJob.serialize();
-            expect(config).to.eql(expectedConfig);
+            config = JSON.stringify(otherJob);
+            expect(config).to.eql(JSON.stringify(expectedConfig));
           });
         });
       });

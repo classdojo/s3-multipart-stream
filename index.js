@@ -2,6 +2,15 @@
  * Write stream to AWS S3 using multipart upload.
 */
 
+
+
+/*
+  TODO:
+    1. Create journal file name in Journal constructor
+    2. Implement the stub method on Journal
+    3. Test Journal
+*/
+
 var Writable       = require("stream").Writable;
 var inherits       = require("util").inherits;
 var chain          = require("slide").chain;
@@ -19,37 +28,37 @@ var multiDebug     = require("debug")("multi");
 var MINIMUM_CHUNK_UPLOAD_SIZE = 5242880;
 var CONCURRENT_UPLOADS = 10;
 
-// function MultipartWriteS3(s3Client) {
-//   this.__s3Client = s3Client;
-//   this.__uploads = [];
-// }
-
-
 /*
- *  @param options
+ *  @param s3Client
+ *  @param [options]
  *          options.chunkUploadSize
- *          options.workingDirectory
+ *          options.journalConfig
+ *              options.journalConfig.sourceFile
+ *              options.journalConfig.workingDirectory
+ *  @param s3MultipartUploadConfig
  *
 */
 inherits(MultipartWriteS3Upload, Writable);
-function MultipartWriteS3Upload(s3Client, s3MultipartUploadConfig, options) {
+function MultipartWriteS3Upload(s3Client, options, s3MultipartUploadConfig) {
   Writable.call(this);
+  if(!s3MultipartUploadConfig) {
+    s3MultipartUploadConfig = options;
+    options = {};
+  }
   this.__s3Client              = s3Client;
-  this.s3MultipartUploadConfig = s3MultipartConfig;
+  this.s3MultipartUploadConfig = s3MultipartUploadConfig;
   this.__partNumber            = 1;
   this.__chunks                = [];
   this.__uploadedParts         = [];
   this.__queuedUploadSize      = 0;
   this.__uploadsInProgress     = 0;
   this.waitingUploads          = [];
-  this.__journal               = new Journal(s3MultipartUploadConfig, options.retryUplaod);
-  this.__uploader              = new Uploader(this, this.__journal);
   this.__concurrentUploads     = options.maxConcurrentUploads || CONCURRENT_UPLOADS;
-  this.__chunkUploadSize    = _.isEmpty(options.chunkUploadSize) || 
-                               _.isNaN(options.chunkUploadSize) ||
-                               options.chunkUploadSize < MINIMUM_CHUNK_UPLOAD_SIZE ?
-                                    MINIMUM_CHUNK_UPLOAD_SIZE : options.chunkUploadSize;
-
+  this.__chunkUploadSize       = _.isEmpty(options.chunkUploadSize) || _.isNaN(options.chunkUploadSize) || 
+      options.chunkUploadSize < MINIMUM_CHUNK_UPLOAD_SIZE ?
+              MINIMUM_CHUNK_UPLOAD_SIZE : options.chunkUploadSize;
+  this.__journal               = new Journal(s3MultipartUploadConfig, options.journalConfig);
+  this.__uploader              = new Uploader(this, this.__journal);
   this.__journal.on("journalError", function() {/* handle journal error */});
 }
 
@@ -85,7 +94,7 @@ function MultipartWriteS3Upload(s3Client, s3MultipartUploadConfig, options) {
  *               StorageClass: 'STANDARD | REDUCED_REDUNDANCY',
  *               WebsiteRedirectLocation: 'STRING_VALUE'
  *             };
- *          options.retryUpload: {
+ *          options.journalConfig: {
  *             workingDirectory: "",
  *             sourceFile: ""
  *          }
@@ -93,13 +102,14 @@ function MultipartWriteS3Upload(s3Client, s3MultipartUploadConfig, options) {
 */
 MultipartWriteS3Upload.create = function(s3Client, options, cb) {
   var myS3Upload;
+  var me = this;
   options.chunkUploadSize = options.chunkUploadSize || MINIMUM_CHUNK_UPLOAD_SIZE;
   /* */
   s3Client.createMultipartUpload(options.multipartCreationParams, function(err, s3MultipartUploadConfig) {
     if(err) {
       return cb(err);
     }
-    myS3Upload = new this(s3Client, s3MultipartUploadConfig, options);
+    myS3Upload = new me(s3Client, options, s3MultipartUploadConfig);
     MultipartWriteS3Upload._addFinishHandler(myS3Upload);
     myS3Upload.__uploader.start();
     cb(null, myS3Upload);
@@ -118,12 +128,7 @@ MultipartWriteS3Upload._addFinishHandler = function(multipartWriteS3Upload) {
 };
 
 
-/* Initial naive implementation of writing each chunk serially to s3.
- * Only accepts Buffer|String right now.
-*/
-
 MultipartWriteS3Upload.prototype._write = function(chunk, enc, cb) {
-  var me = this;
   this.__chunks.push(chunk);
   this.__queuedUploadSize = this.__queuedUploadSize + _.size(chunk);
   if(this.__queuedUploadSize > this.__chunkUploadSize) {
@@ -168,31 +173,41 @@ MultipartWriteS3Upload.prototype.finishUpload = function(cb) {
 
 MultipartWriteS3Upload.prototype._completeMultipartUpload = function(cb) {
   var me = this;
-  var sortedParts;
   var completeConfig;
+  var error;
   multiDebug("Waiting for uploader to finish");
-  this.__uploader.once("empty", function() {
-    sortedParts = _.sortBy(me.__uploadedParts, function(upload) {
-      return upload.PartNumber;
-    });
-    completeConfig = {
-      UploadId         : me.s3MultipartUploadConfig.UploadId,
-      Bucket           : me.s3MultipartUploadConfig.Bucket,
-      Key              : me.s3MultipartUploadConfig.Key,
-      MultipartUpload  : {
-        Parts: sortedParts
-      }
-    };
-    multiDebug("Completing upload transfer");
-    me.__uploader.stop();
-    me.__s3Client.completeMultipartUpload(completeConfig, function(err, multipartResponse) {
-      /* let's journal the response */
-      me.__journal.logCompleteUploadResponse(err, multipartResponse);
+  this.__uploader.once("empty", this._finalizeUpload.bind(this, cb));
+};
 
+
+MultipartWriteS3Upload.prototype._finalizeUpload = function(cb) {
+  var sortedParts, completeConfig,
+  me = this;
+  sortedParts = _.sortBy(me.__uploadedParts, function(upload) {
+    return upload.PartNumber;
+  });
+  completeConfig = {
+    UploadId         : me.s3MultipartUploadConfig.UploadId,
+    Bucket           : me.s3MultipartUploadConfig.Bucket,
+    Key              : me.s3MultipartUploadConfig.Key,
+    MultipartUpload  : {
+      Parts: sortedParts
+    }
+  };
+
+  multiDebug("Completing upload transfer");
+  me.__uploader.stop();
+  me.__s3Client.completeMultipartUpload(completeConfig, function(err, multipartResponse) {
+    /*  Always log both error and multipart response into journal */
+    me.__journal.logCompleteUploadResponse(err, multipartResponse, function(e) {
+      error = err || e;
+      if(error) {
+        return cb(error);
+      }
+      cb();
     });
   });
 };
-
 
 
 /*
@@ -239,115 +254,152 @@ MultipartWriteS3Upload.prototype._uploadChunks = function(partNumber, chunks, cb
  * Always initialized. Does nothing if journal mode is not set
  *
  *
- *      {
-          workingFile :
-          sourceFile  :
-        }
+ *     @param []
+ *       {
+ *         workingDirectory :
+ *         sourceFile  :
+ *       }
 */
-function Journal(s3MultipartUploadConfig, retryOptions) {
-  var me              = this;
-  this.__filePath     = filePath;
+
+
+var journalStub = {
+  logFinishedJobs: function(a, cb) { cb(); },
+  logCompleteUploadResponse: function(a, b, cb) { cb(); },
+  end: function(cb) { cb(); },
+  hashSourceFile: function(cb) { cb(); }
+};
+
+inherits(Journal, EventEmitter);
+function Journal(s3MultipartUploadConfig, journalConfig) {
+  EventEmitter.call(this);
+  var me                  = this;
+  this.__journalMode      = !!journalConfig;
+  if(!this.__journalMode) {
+    return this._stubMethods();
+  }
+  this.__sourceFilePath     = journalConfig.sourceFile;
+  this.__journalFile        = this._getJournalFileName(journalConfig.workingDirectory);
   this.__journal      = {
-    uploadConfig: s3MultipartConfig,
+    uploadConfig: s3MultipartUploadConfig,
     segments: {
       success: [],
       failed: []
     }
   };
-  this.__filePath     = filePath;
-  this.__journalMode  = !!retryOptions;
-  this._writeFile     = once(this._writeFile_);
-  this._cb            = function() {};
+  this.__writeLk = 0;
 }
 
-Journal.prototype.logUploadJob = function(job) {
-  if(/failed|success/.match(job.status)) {
-    this._writeFile();
+/* 
+ * Does not enforce 'once' semantics. Two successive
+ * calls could result in inconsistencies between
+ * this.__journal and the journal file contents.
+ */
+Journal.prototype.logFinishedJobs = function(jobs, cb) {
+  for(var i in jobs) {
+    this.__journal.segments[jobs[i].status].push(jobs[i]);
   }
+  this._updateJournalFile(cb);
 };
 
-/* once version of function is stored in _writeFile */
-Journal.prototype._writeFile_ = function(cb) {
+Journal.prototype._getJournalFileName = function(workingDirectory) {
+  var ISONow = (new Date()).toISOString();
+  return workingDirectory + "/" + ISONow;
+};
+
+/*
+ * Stubs out all publicly used methods to transparently disable
+ * journaling
+*/
+Journal.prototype._stubMethods = function() {
+  _.extend(this, journalStub);
+  return this;
+};
+
+Journal.prototype._updateJournalFile = function(cb) {
+  var me = this;
+  this.__writeLk++;
   fs.writeFile(this.__journalFile, JSON.stringify(this.__journal), function(err) {
+    this.__writeLk--;
     if(err) {
-      me.emit("journalError", err);
+      return cb(err);
     }
-    this._writeFile = once(this._writeFile_);
-    (cb || this._cb)();
+    cb();
   });
 };
 
-Journal.prototype.logCompleteUploadResponse = function(err, uploadResponse) {
-
+Journal.prototype.logCompleteUploadResponse = function(err, uploadResponse, cb) {
+  this.__journal.uploadResponse = {
+    body: uploadResponse
+  };
+  if(err) {
+    this.__journal.uploadResponse.err = err.toString();
+  }
+  this._end(cb);
 };
 
-/* 
+/*
  * 1. ensure outstanding fs commits are finished.
  * 2. hash sourcefile
- * 3. finish last fs commit recording the file hash and return
+ * 3. finish last fs commit recording the file hash and complete upload response
 */
-Journal.prototype.end = function(cb) {
+Journal.prototype._end = function(cb) {
   chain([
-    this._writeFile.called && [this._waitForFileWriteFinish()],
+    !this.__writeLk && [this.__waitForWritesToFinish],
     [this.hashSourceFile.bind(this)]
   ], cb);
 };
 
+Journal.prototype.__waitForWritesToFinish = function(cb) {
+  var me = this;
+  var t = setTimeout(function() {
+    if(me.__writeLk === 0) {
+      clearTimeout(t);
+      cb();
+    }
+  }, 100);
+};
+
+
 Journal.prototype.hashSourceFile = function(cb) {
   var me                   = this;
-  var sourceFileReadStream = fs.createReadStream(this.__filePath);
+  var sourceFileReadStream = fs.createReadStream(this.__sourceFilePath);
   var hasher               = new Writable();
   var spark                = new SparkMD5();
+  var len = 0;
   hasher._write = function(buf, enc, cb) {
+    len = len + buf.length;
     spark.append(buf);
     cb();
   };
   sourceFileReadStream.pipe(hasher);
-  hasher.on("end", function() {
+  hasher.on("finish", function() {
     me.__journal.sourceFileChecksum = spark.end();
-    me._writeFile_(cb);
+    me._updateJournalFile(cb);
   });
 };
 
-Journal.prototype._waitForFileWriteFinish = function() {
-  return function(cb) {
-    this._cb = cb;
-  }
-};
 
-/* Only allow at most one outstanding commit to fs.
-    
-    TODO: replace manual bookkeeping with 'once' function  
+/*
+  @param multipartWriteS3Upload - Configured instance of MultipartWriteS3Upload
+  @param journal - Instance of Journal
 */
-Journal.prototype.__commitJournal = function() {
-  if(!this.__journalMode) {
-    return;
-  }
-  var me = this;
-  if(!this.__outstandingJournal) {
-    this.__outstandingJournal = true;
-    fs.writeFile(this.__journalFile, JSON.stringify(this.__journal), function(err) {
-      if(err) {
-        return me.emit("journalError", err);
-      }
-      me.__outstandingJournal = false;
-    });
-  }
-};
-
-
-
 inherits(Uploader, EventEmitter);
-function Uploader(s3Multipart, journal) {
-  this.__waitingUploads     = s3Multipart.waitingUploads;
+function Uploader(multipartWriteS3Upload, journal) {
+  this.__waitingUploads     = multipartWriteS3Upload.waitingUploads;
+  this.__concurrentUploads  = multipartWriteS3Upload.__concurrentUploads;
   this.__id                 = uuid.v1();
   this.__outstandingUploads = [];
   this.__failedUploads      = [];
   this.__journal            = journal;
+  this._serviceUploads      = once(this._serviceUploads_);
+  this.__serviceInterval    = 1000;
 }
 
 Uploader.prototype.start = function() {
-  this.__i = setInterval(this.serviceUploads.bind(this), 1000);
+  var me = this;
+  this.__i = setInterval(function() {
+    me._serviceUploads();
+  }, this.__serviceInterval);
 };
 
 Uploader.prototype.stop = function() {
@@ -355,33 +407,49 @@ Uploader.prototype.stop = function() {
   clearInterval(this.__i);
 };
 
-Uploader.prototype.serviceUploads = function() {
-  var upload;
-  //cleanup outstandingUploads array
-  this._cleanupAndLogFinishedJobs();
-  while(this.__outstandingUploads.length < this.__concurrentUploads && !_.isEmpty(this.__waitingUploads)) {
-    uploaderDebug("Initiating upload");
-    upload = new UploadJob(this.__waitingUploads.shift());
-    upload.start();
-    this.__outstandingUploads.push(upload);
-  }
-  if(_.isEmpty(this.__waitingUploads) && _.isEmpty(this.__outstandingUploads)) {
-    uploaderDebug("Empty");
-    this.emit("empty");
-  }
+/* TODO: Replace with an event based model that refills the outgoing queue only when needed. */
+Uploader.prototype._serviceUploads_ = function(cb) {
+  var upload,
+  me = this;
+  cb = cb || function() {};
+  this._cleanupAndLogFinishedJobs(function(err) {
+    if(err) {
+      this.emit("uploaderError", err);
+    } else {
+      //refill pipeline
+      while(me.__outstandingUploads.length < me.__concurrentUploads && !_.isEmpty(me.__waitingUploads)) {
+        uploaderDebug("Initiating upload");
+        upload = new UploadJob(me.__waitingUploads.shift());
+        upload.start();
+        me.__outstandingUploads.push(upload);
+      }
+      if(_.isEmpty(me.__waitingUploads) && _.isEmpty(me.__outstandingUploads)) {
+        uploaderDebug("Empty");
+        me.emit("empty");
+      }
+    }
+    me._serviceUploads = once(me._serviceUploads_);
+    cb(err);
+  });
 };
 
-Uploader.prototype._cleanupAndLogFinishedJobs = function() {
-  var upload, i, compacted;
+Uploader.prototype._cleanupAndLogFinishedJobs = function(cb) {
+  var upload, i, compacted,
+  finishedJobs = [];
   for(i in this.__outstandingUploads) {
     upload = this.__outstandingUploads[i];
     if(/failed|success/.test(upload.status)) {
-      this.__journal.logUploadJob(upload)
+      // this.__journal.logUploadJob(upload);
+      finishedJobs.push(upload);
       this.__outstandingUploads[i] = null;
     }
   }
   compacted = _.compact(this.__outstandingUploads);
   this.__outstandingUploads = compacted;
+  if(finishedJobs.length) {
+    return this.__journal.logFinishedJobs(finishedJobs, cb);
+  }
+  cb();
 };
 
 
@@ -407,7 +475,7 @@ UploadJob.prototype.start = function() {
   });
 };
 
-UploadJob.prototype.serialize = function() {
+UploadJob.prototype.toJSON = function() {
   var encodedData = [],
   serialized = {
     partNumber: this.config.partNumber,
@@ -428,4 +496,4 @@ module.exports = MultipartWriteS3Upload;
 //export for testing
 module.exports.__Uploader   = Uploader;
 module.exports.__UploadJob  = UploadJob;
-moduel.exports.__Journal    = Journal;
+module.exports.__Journal    = Journal;
